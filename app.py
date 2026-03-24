@@ -12,10 +12,6 @@ load_dotenv()
 
 # Get API key from environment variables
 API_KEY = os.getenv("OPENAI_API_KEY")
-if API_KEY is None:
-    st.error("Error: OPENAI_API_KEY not found in environment variables")
-    st.stop()
-
 # System prompt for PQRS processing
 SYSTEM_PROMPT = """
 You Cundi, a specialized assistant for processing PQRS (Petitions, Queries, Claims, and Requests) for CAR Colombia.
@@ -451,6 +447,9 @@ def get_chat_response(prompt, temperature=0.3):
 
 def main():
     st.set_page_config(page_title="CARresponde", layout="centered")
+    if not API_KEY:
+        st.error("Error: OPENAI_API_KEY no fue encontrada en las variables de entorno.")
+        st.stop()
     st.write(logo, unsafe_allow_html=True)
     st.title("CAResponde", anchor=False)
     st.markdown("**Soy CAResponde, tú asistente virtual para la CAR. Entiende tus Peticiones, Quejas, Reclamos y Solicitudes (PQRS)**")
