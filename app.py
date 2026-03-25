@@ -1,8 +1,35 @@
 import os
 import re
 import json
+import ssl
+import unicodedata
+import warnings
+warnings.filterwarnings('ignore')
+
+# ── Patch SSL globally BEFORE any network library is imported ──────────────────
+# Needed on Windows corporate networks with self-signed certificates
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
+
+_orig_create_default_context = ssl.create_default_context
+def _patched_ssl_context(*args, **kwargs):
+    ctx = _orig_create_default_context(*args, **kwargs)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+ssl.create_default_context = _patched_ssl_context
+
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+# ───────────────────────────────────────────────────────────────────────────────
+
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_from_directory
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,8 +38,6 @@ from supabase import create_client, Client
 load_dotenv()
 
 # Fix SSL certificate verification for corporate/Windows networks
-os.environ['PYTHONHTTPSVERIFY'] = '0'
-os.environ['CURL_CA_BUNDLE'] = ''
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = "https://oeqiugrnbfgxxqnxpudv.supabase.co"
@@ -251,14 +276,23 @@ def extract_table_data(markdown_text):
         return None, markdown_text
 
 
+def _normalize_key(text):
+    """Lowercase, remove accents, replace spaces with underscores, keep only alnum+underscore."""
+    # Decompose unicode and remove combining characters (accents)
+    nfkd = unicodedata.normalize('NFKD', text)
+    ascii_str = ''.join(c for c in nfkd if not unicodedata.combining(c))
+    key = ascii_str.lower().strip().replace(' ', '_')
+    key = re.sub(r'[^a-z0-9_]', '', key)
+    return key
+
+
 def save_to_supabase(fields):
     if not supabase:
         return False, "Cliente Supabase no inicializado"
     try:
         data_dict = {}
         for campo, valor in fields.items():
-            key = campo.lower().replace(' ', '_').strip()
-            key = ''.join(c for c in key if c.isalnum() or c == '_')
+            key = _normalize_key(campo)
             data_dict[key] = str(valor)
         supabase.table("pqrs").insert(data_dict).execute()
         return True, "PQRS radicada exitosamente"
@@ -269,6 +303,11 @@ def save_to_supabase(fields):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory('static', 'logo.png', mimetype='image/png')
 
 
 @app.route('/api/chat', methods=['POST'])
