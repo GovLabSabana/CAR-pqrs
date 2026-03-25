@@ -1,9 +1,8 @@
-streamlit
+flask
 pandas
 python-dotenv
 langchain
-langchain-core 
-langchain-openai 
-langchain-community 
+langchain-core
+langchain-openai
+langchain-community
 supabase
-plotly

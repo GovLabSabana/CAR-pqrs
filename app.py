@@ -1,28 +1,26 @@
-import pandas as pd
-import streamlit as st
 import os
+import re
+import json
+import pandas as pd
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.callbacks import BaseCallbackHandler
-import re 
 from supabase import create_client, Client
-import plotly.express as px
 
-# Load environment variables
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Supabase
 SUPABASE_URL = "https://oeqiugrnbfgxxqnxpudv.supabase.co"
 SUPABASE_KEY = "sb_publishable_wqs-TPzsR3kyzmeuO8gFQQ_YF81Dslc"
+
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception:
     supabase = None
 
-# System prompt for PQRS processing
+app = Flask(__name__)
+
 SYSTEM_PROMPT = """
 You Cundi, a specialized assistant for processing PQRS (Petitions, Queries, Claims, and Requests) for CAR Colombia.
 
@@ -179,318 +177,146 @@ When receiving a PQRS request (prefix 'PQRS:'), analyze the content and respond 
 | Asunto                       | [PQRS Description]                                                                          |
 | Dirección Asignada           | [Relevant CAR Direction based on the subject]                                                 |
 | Justificación                | [Brief explanation of why this direction was selected]                                         |
-| Tipo de Respuesta            | [NO APLICA, INTERPONER RECURSO, RESPUESTA A OFICIO (citación, notificación, invitación, etc.)]                                                                           |
+| Tipo de Respuesta            | [NO APLICA, INTERPONER RECURSO, RESPUESTA A OFICIO]                                          |
 | Tipo Remitente               | [Juridica, Natural, Anonima]                                                                  |
 | Fecha                        | [Date identified in the text]                                                                  |
-| Proceso especial             | [No Aplica, Thomas van der Hammen, Río Bogotá, Cerros Orientales, Auditorías - Entes de Control, DRMI Fúquene, Reporte de licencias de parcelación y construcción] |
-| Tipo de Tramite              | [Acciones Constitucionales, Certificación Ambiental para propuesta de Concesión Minera, Curadurías, DP Congreso de la República Ley 5/92 10 días, DP Congreso de la República Ley 5/92 48h, DP Interes Particular Autorizaciones ,  DP Congreso de la República Ley 5/92 5 días, Dp de Consulta, DP en Cumplimiento de Deber Legal ,Dp de interés Particular (Solicitud Certificaciones Cto, pasantias laborales) , Dp, de oficio Permisivos, Dp Defensoria del Pueblo Ley 5/92 5 días, Dp En cumplimiento de un deber legal (Permisos), DP PERMISIVOS, Dp Queja Ambiental (Afectación ambiental), Dp Queja por atención al servicio), DP Queja por Olores Ofensivos, DP Reclamo (Contra Funciones/Funcionarios CAR), DP Recursos - Acuerdos 10 y 09, DP Recursos(15 Días), DP Recursos (60 Días), DP Recursos Exenciones Cobro Coactivo, DP Solicitud de Copias, DP Solicitud de Exepciones de Cobro Coactivo - Estatuto Tributario, DP Solicitud de Exepciones y Reclamaciones Facturación, Documento Informacion Respuesta, Documento Remicion, Procesos Contractuales , Documento Remision Informacion, Documentos para información Institucional - Remisión Información, Ingreso por Redes Sociales, Ingreso PQR, Memorando Interno, Observaciones y/o recomendaciones POMCAS Decreto 2076-2015, Radicación Pago Copias, Radicación Trámites de Oficio o inicidados por CAR, Trámite Res 511 de 2012 Reserva Forestal Cuenca Alta Río Bogotá, Trámites Autodeclaración de Vertimientos Res. 1792 de 2013] |
-| Departamento                  | [Department Name]                                                                              |
-| Vereda                       | [If applicable, name of the vereda]                                                          |
-| Predio                       | [If the property(predio) name is provided, include it]                                                |
+| Proceso especial             | [No Aplica, Thomas van der Hammen, Río Bogotá, Cerros Orientales, etc.]                       |
+| Tipo de Tramite              | [Select from the applicable types]                                                            |
+| Departamento                 | [Department Name]                                                                              |
+| Vereda                       | [If applicable]                                                                               |
+| Predio                       | [If applicable]                                                                               |
 | Medio de documento           | Oficio                                                                                        |
 | Numero de Folios             | 1                                                                                            |
-| Anexos                        | VACIO                                                                                         |
-| Observaciones                | [Summary of what the person is asking in the PQRS]                                            |
+| Anexos                       | VACIO                                                                                         |
+| Observaciones                | [Summary of what the person is asking]                                                        |
 | Copia a                      | VACIO                                                                                         |
 | Quien Entrega                | [Empresa de mensajería, Persona Natural]                                                       |
-| Atención Preferencial        | [Adulto Mayor, Desplazado, Discapacidad física, Discapacidad Mental, Discapacidad Sensorial, Grupos Étnicos Minoritarios, Mujer Embarazada, Niños o Adolescentes, Periodista, Veterano de la Fuerza Pública] |
+| Atención Preferencial        | [Adulto Mayor, Desplazado, Discapacidad, etc.]                                                |
 
-Rules for handling PQRS and direction assignment:
-1. Carefully analyze the subject matter of the PQRS to select the most appropriate direction based on their competencies.
+Rules:
+1. Carefully analyze the subject matter to select the most appropriate direction.
 2. Provide a brief justification for the assignment.
-3. If the subject involves multiple directions, select the primary one most relevant to the main issue.
+3. If the subject involves multiple directions, select the primary one.
 4. The answer should ALWAYS be in Spanish.
 5. If the request doesn't explicitly mention CAR, still process and classify it.
-6. If the user provides a PQRS but it is very messy or lacks essential information (like Name, ID, Location, Subject, or Contact info), DO NOT generate the table immediately. Instead, kindly and conversationally ask the user step-by-step for the missing information until you have enough data to fill the required fields.
-7. Only generate the markdown table when you have gathered sufficient information (or if the initial request already has enough details).
-8. You can select multiple options for the "Tipo de Tramite" field.
-9. If the PQRS has a specific location (municipality, vereda, predio), cross it with the local directions to determine the appropriate one.
+6. If the PQRS lacks essential information, ask conversationally for missing data before generating the table.
+7. Only generate the markdown table when you have sufficient information.
+8. You can select multiple options for "Tipo de Tramite".
+9. If the PQRS has a specific location, cross it with local directions.
 
-For regular conversation, respond naturally as a helpful assistant with knowledge about CAR's structure and functions y guía al usuario amablemente.
+For regular conversation, respond naturally as a helpful assistant with knowledge about CAR's structure and functions.
 """
 
-class StreamHandler(BaseCallbackHandler):
-    def __init__(self, container):
-        self.container = container
-        self.text = ""
-        
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        self.text += token
-        display_response(self.text, self.container)
 
 def extract_table_data(markdown_text):
     try:
         table_pattern = r'\|.*\|'
         table_rows = re.findall(table_pattern, markdown_text)
-        
         if not table_rows:
-            return None, None
-            
+            return None, markdown_text
         headers = ['Campo', 'Valor']
         data = []
         for row in table_rows[2:]:
             values = [col.strip() for col in row.split('|')[1:-1]]
             if len(values) == 2:
                 data.append(values)
-        
         df = pd.DataFrame(data, columns=headers)
-        pre_table = markdown_text.split('|')[0].strip()
-        post_table = markdown_text.split('|')[-1].strip()
-        other_text = f"{pre_table}\n\n{post_table}".strip()
-        
+        # Extract text before/after table
+        lines = markdown_text.split('\n')
+        pre, post, in_table = [], [], False
+        for line in lines:
+            if re.match(r'\|.*\|', line.strip()):
+                in_table = True
+            elif in_table:
+                post.append(line)
+            else:
+                pre.append(line)
+        other_text = '\n'.join(pre + post).strip()
         return df, other_text
-    except Exception as e:
-        return None, None
+    except Exception:
+        return None, markdown_text
 
-def save_to_supabase(df):
+
+def save_to_supabase(fields):
     if not supabase:
-        st.error("Error: Cliente de Supabase no inicializado. Revisa tus credenciales.")
-        return False
-        
+        return False, "Cliente Supabase no inicializado"
     try:
         data_dict = {}
-        for index, row in df.iterrows():
-            key = str(row['Campo']).lower().replace(' ', '_').strip()
-            # Handle special characters for supabase columns
+        for campo, valor in fields.items():
+            key = campo.lower().replace(' ', '_').strip()
             key = ''.join(c for c in key if c.isalnum() or c == '_')
-            data_dict[key] = str(row['Valor'])
-            
-        # Intentamos insertar en la tabla 'pqrs'
-        response = supabase.table("pqrs").insert(data_dict).execute()
-        return True
+            data_dict[key] = str(valor)
+        supabase.table("pqrs").insert(data_dict).execute()
+        return True, "PQRS radicada exitosamente"
     except Exception as e:
-        st.error(f"Error al guardar en Supabase: Verifica que la tabla 'pqrs' exista con los nombres de columnas correctos (ej: nombre, cedula). Detalle: {str(e)}")
-        return False
+        return False, str(e)
 
-def display_response(response_text, container):
-    if '|' in response_text:
-        df, other_text = extract_table_data(response_text)
-        if df is not None:
-            if other_text:
-                container.markdown(other_text)
-            
-            container.markdown("### Información PQRS")
-            styled_df = df.style.set_properties(**{
-                'background-color': '#ffffff',
-                'color': '#03688b',
-                'border': '2px solid #029b9a'
-            })
-            
-            container.dataframe(styled_df, use_container_width=True, hide_index=True)
-            
-            # Save the current PQRS to session state for the Confirmation UI
-            st.session_state['current_pqrs'] = df
-        else:
-            container.markdown(response_text)
-    else:
-        container.markdown(response_text)
 
-def get_chat_response(prompt, temperature=0.3):
-    try:
-        response_placeholder = st.empty()
-        stream_handler = StreamHandler(response_placeholder)
-        
-        chat_model = ChatOpenAI(
-            model="gpt-4o",
-            temperature=temperature,
-            api_key=API_KEY,
-            streaming=True,
-            callbacks=[stream_handler]
-        )
-        
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=prompt)
-        ]
-        
-        if "messages" in st.session_state:
-            for msg in st.session_state.messages[-3:]:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    data = request.json
+    prompt = data.get('prompt', '')
+    history = data.get('history', [])
+
+    def generate():
+        try:
+            chat_model = ChatOpenAI(
+                model="gpt-4o",
+                temperature=0.3,
+                api_key=API_KEY,
+                streaming=True,
+            )
+            messages = [SystemMessage(content=SYSTEM_PROMPT)]
+            for msg in history[-6:]:
+                if msg['role'] == 'user':
+                    messages.append(HumanMessage(content=msg['content']))
                 else:
-                    messages.append(SystemMessage(content=msg["content"]))
-        
-        response = chat_model.invoke(messages)
-        return stream_handler.text
-        
-    except Exception as e:
-        return f"Error: {str(e)}"
+                    messages.append(SystemMessage(content=msg['content']))
+            messages.append(HumanMessage(content=prompt))
 
-def render_dashboard():
-    st.header("📊 Dashboard de Gestión Institucional", anchor=False)
-    
+            full_text = ""
+            for chunk in chat_model.stream(messages):
+                token = chunk.content
+                full_text += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+
+            # After streaming, check if there's a table
+            df, other_text = extract_table_data(full_text)
+            if df is not None:
+                table_data = df.to_dict('records')
+                yield f"data: {json.dumps({'table': table_data, 'other_text': other_text})}\n\n"
+
+            yield f"data: {json.dumps({'done': True, 'full_text': full_text})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+
+
+@app.route('/api/save_pqrs', methods=['POST'])
+def save_pqrs():
+    data = request.json
+    fields = data.get('fields', {})
+    success, message = save_to_supabase(fields)
+    return jsonify({'success': success, 'message': message})
+
+
+@app.route('/api/dashboard')
+def dashboard():
     if not supabase:
-        st.error("Supabase no está configurado correctamente para cargar métricas.")
-        return
-        
+        return jsonify({'error': 'Supabase no configurado'})
     try:
         response = supabase.table("pqrs").select("*").execute()
-        data = response.data
-        if not data:
-            st.info("No hay datos suficientes registrados en la base de datos (tabla 'pqrs') para generar gráficos.")
-            return
-            
-        df = pd.DataFrame(data)
-        
-        # Variables: Municipio, Dirección", Tipo Res, Tipo Rem, Fecha, Proceso, Trámite, Dpto, Atención
-        # Plot 1: Municipio
-        if 'municipio' in df.columns:
-            m_count = df['municipio'].value_counts().reset_index()
-            fig1 = px.bar(m_count, x='municipio', y='count', title="PQRS por Municipio", color_discrete_sequence=['#029b9a'])
-            st.plotly_chart(fig1, use_container_width=True)
-            
-        col1, col2 = st.columns(2)
-        with col1:
-            if 'direccion_asignada' in df.columns:
-                fig2 = px.pie(df['direccion_asignada'].value_counts().reset_index(), values='count', names='direccion_asignada', title="Distribución por Dirección Asignada", color_discrete_sequence=['#03688b', '#ed7403', '#f8b101', '#acca14', '#029b9a'])
-                st.plotly_chart(fig2, use_container_width=True)
-        with col2:
-            if 'departamento' in df.columns:
-                fig3 = px.pie(df['departamento'].value_counts().reset_index(), values='count', names='departamento', title="Afectación por Departamento", color_discrete_sequence=['#acca14', '#029b9a'])
-                st.plotly_chart(fig3, use_container_width=True)
-                
-        col3, col4 = st.columns(2)
-        with col3:
-            if 'tipo_remitente' in df.columns:
-                fig4 = px.pie(df['tipo_remitente'].value_counts().reset_index(), values='count', names='tipo_remitente', title="Tipo de Remitente", color_discrete_sequence=['#f8b101', '#ed7403'])
-                st.plotly_chart(fig4, use_container_width=True)
-        with col4:
-            if 'tipo_respuesta' in df.columns:
-                fig5 = px.bar(df['tipo_respuesta'].value_counts().reset_index(), x='tipo_respuesta', y='count', title="Tipo de Respuesta Requerida", color_discrete_sequence=['#03688b'])
-                st.plotly_chart(fig5, use_container_width=True)
-                
-        col5, col6 = st.columns(2)
-        with col5:
-            if 'atencion_preferencial' in df.columns:
-                fig6 = px.pie(df['atencion_preferencial'].value_counts().reset_index(), values='count', names='atencion_preferencial', title="Atención Preferencial", color_discrete_sequence=['#029b9a', '#acca14'])
-                st.plotly_chart(fig6, use_container_width=True)
-        with col6:
-            if 'proceso_especial' in df.columns:
-                fig7 = px.pie(df['proceso_especial'].value_counts().reset_index(), values='count', names='proceso_especial', title="Procesos Especiales", color_discrete_sequence=['#ed7403', '#f8b101'])
-                st.plotly_chart(fig7, use_container_width=True)
-                
-        if 'tipo_de_tramite' in df.columns or 'tipo_tramite' in df.columns:
-            tr_col = 'tipo_de_tramite' if 'tipo_de_tramite' in df.columns else 'tipo_tramite'
-            tr_count = df[tr_col].value_counts().reset_index().head(10)
-            fig8 = px.bar(tr_count, x='count', y=tr_col, orientation='h', title="Top 10 Tipos de Trámite", color_discrete_sequence=['#03688b'])
-            st.plotly_chart(fig8, use_container_width=True)
-
+        return jsonify({'data': response.data})
     except Exception as e:
-        st.error(f"Error al cargar datos del Dashboard: {str(e)}")
+        return jsonify({'error': str(e)})
 
-def main():
-    st.set_page_config(page_title="CARresponde", layout="wide", page_icon="📝")
-    
-    # Custom CSS
-    st.markdown(f"""
-    <style>
-    .stApp {{
-        background-color: #ffffff;
-    }}
-    /* Main titles and markdown text */
-    h1, h2, h3, h4, p, span {{
-        color: #03688b !important;
-    }}
-    /* Primary buttons */
-    .stButton>button {{
-        background-color: #029b9a !important;
-        color: #ffffff !important;
-        border: none;
-        border-radius: 5px;
-    }}
-    .stButton>button:hover {{
-        background-color: #03688b !important;
-        color: #ffffff !important;
-    }}
-    /* Tabs custom styling */
-    button[data-baseweb="tab"] {{
-        color: #03688b !important;
-        font-weight: bold;
-    }}
-    button[data-baseweb="tab"][aria-selected="true"] {{
-        background-color: #ffffff !important;
-        border-bottom: 4px solid #ed7403 !important;
-        color: #ed7403 !important;
-    }}
-    </style>
-    """, unsafe_allow_html=True)
 
-    # Validate OpenAI key
-    if not API_KEY:
-        st.error("Error: OPENAI_API_KEY no fue encontrada en las variables de entorno.")
-        st.stop()
-
-    with st.sidebar:
-        try:
-            st.image("logo.png", use_container_width=True)
-        except:
-            st.title("CAR Cundinamarca")
-        
-        st.markdown("**Bienvenido al Sistema de Gestión de PQRS**")
-        st.markdown("Clasifica tus requerimientos y visualiza estadísticas en tiempo real.")
-        
-        if st.button("Borrar Historial del Chat"):
-            st.session_state.messages = []
-            st.session_state.current_pqrs = None
-            st.rerun()
-
-    tab_chat, tab_dash = st.tabs(["🤖 Asistente Virtual", "📈 Dashboard Estadístico"])
-    
-    with tab_chat:
-        st.title("CAResponde", anchor=False)
-        st.markdown("**Soy Cundi, tú asistente virtual para la CAR.** Radica aquí tus PQRS de forma estructurada.")
-        
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-            
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                if message["role"] == "assistant" and '|' in message["content"]:
-                    display_response(message["content"], st)
-                else:
-                    st.markdown(message["content"])
-
-        # Peticion de Confirmación
-        if 'current_pqrs' in st.session_state and st.session_state['current_pqrs'] is not None:
-            st.markdown("---")
-            st.warning("**¿Deseas radicar y enviar esta PQRS al sistema central de la CAR (Supabase)?**")
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("✅ Sí, Radicar PQRS"):
-                    success = save_to_supabase(st.session_state['current_pqrs'])
-                    if success:
-                        st.success("¡PQRS enviada exitosamente a la base de datos!")
-                        st.session_state['current_pqrs'] = None
-                        # We use time.sleep(1) to let the success message display before clearing it out, or just leave it until next response.
-            with col2:
-                if st.button("❌ Cancelar / Ignorar"):
-                    st.session_state['current_pqrs'] = None
-                    st.rerun()
-
-        if prompt := st.chat_input("Escribe tu solicitud acá..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            
-            with st.chat_message("assistant"):
-                is_pqrs = prompt.upper().startswith("PQRS:")
-                if is_pqrs:
-                    pqrs_content = prompt[5:].strip()
-                    response = get_chat_response(pqrs_content)
-                else:
-                    response = get_chat_response(prompt)
-                
-                # Check directly format for capturing the Table
-                if '|' in response:
-                    df, _ = extract_table_data(response)
-                    if df is not None:
-                        st.session_state['current_pqrs'] = df
-                
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                st.rerun()
-
-    with tab_dash:
-        render_dashboard()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
