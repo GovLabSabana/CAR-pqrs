@@ -10,14 +10,28 @@ from supabase import create_client, Client
 
 load_dotenv()
 
+# Fix SSL certificate verification for corporate/Windows networks
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+
 API_KEY = os.getenv("OPENAI_API_KEY")
 SUPABASE_URL = "https://oeqiugrnbfgxxqnxpudv.supabase.co"
 SUPABASE_KEY = "sb_publishable_wqs-TPzsR3kyzmeuO8gFQQ_YF81Dslc"
 
 try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    import httpx
+    from supabase import ClientOptions
+    _no_ssl_client = httpx.Client(verify=False)
+    supabase: Client = create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        options=ClientOptions(httpx_client=_no_ssl_client)
+    )
 except Exception:
-    supabase = None
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        supabase = None
 
 app = Flask(__name__)
 
